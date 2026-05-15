@@ -38,7 +38,8 @@ if AUTO_CP:
     args.remove("--auto-cp")
 
 # PTO-шаблон (нужен только в режиме --template)
-PTO_TEMPLATE = Path("/home/nuc5/rpi_siyi/CENTER - RIGHT.pto")
+SCRIPT_DIR   = Path(__file__).resolve().parent
+PTO_TEMPLATE = SCRIPT_DIR / "60-0-60.pto"
 
 
 def find_latest_shots_dir() -> Path:

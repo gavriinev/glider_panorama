@@ -10,14 +10,17 @@
 
 ```
 glider_panorama/
-├── setup.sh              # Скрипт установки всех зависимостей
-├── configure_network.sh  # Настройка сети (policy-based routing + SSH)
-├── requirements.txt      # Python-зависимости
-├── siyi_sdk.py           # SDK для управления SIYI A8 mini (UDP)
-├── panorama_shoot.py     # Съёмка по заданным позициям
-├── stitch_panorama.py    # Склейка панорамы (шаблон / авто)
-├── 60-0-60.pto           # PTO-шаблон Hugin (калиброванные параметры)
-└── shots/                # Снимки (создаётся автоматически)
+├── setup.sh                   # Скрипт установки всех зависимостей
+├── configure_network.sh       # Настройка сети (policy-based routing + SSH)
+├── requirements.txt           # Python-зависимости
+├── siyi_sdk.py                # SDK для управления SIYI A8 mini (UDP)
+├── panorama_shoot.py          # Съёмка по заданным позициям
+├── startup_controller.py      # Автозапуск: Follow Mode + RC → панорама
+├── glider-network.service     # systemd-юнит: настройка сети при старте
+├── glider-controller.service  # systemd-юнит: запуск контроллера (зависит от сетевого)
+├── stitch_panorama.py         # Склейка панорамы (шаблон / авто)
+├── 60-0-60.pto                # PTO-шаблон Hugin (калиброванные параметры)
+└── shots/                     # Снимки (создаётся автоматически)
     └── YYYYMMDD_HHMMSS/
         ├── LEFT.jpg
         ├── CENTER.jpg
@@ -140,7 +143,7 @@ ip -br addr | grep 192.168.144
 Пример вывода:
 
 ```
-enp88s0          UP  192.168.144.30/24    ← порт для Air Unit
+eth0          UP  192.168.144.30/24    ← порт для Air Unit
 enxec9a0c162d05  UP  192.168.144.32/24    ← порт для A8 mini
 ```
 
@@ -150,7 +153,7 @@ enxec9a0c162d05  UP  192.168.144.32/24    ← порт для A8 mini
 
 ```bash
 # Интерфейс для Air Unit и всех устройств за ним
-IF_AIR="enp88s0"
+IF_AIR="eth0"
 IP_AIR_LOCAL="192.168.144.30"
 
 # Устройства, доступные через Air Unit
@@ -201,13 +204,7 @@ ip route get 192.168.144.25
 
 #### Сохранение после перезагрузки
 
-Policy-based routing сбрасывается при перезагрузке. Для автозапуска:
-
-```bash
-sudo crontab -e
-# Добавить строку:
-@reboot /путь/к/glider_panorama/configure_network.sh
-```
+Policy-based routing сбрасывается при перезагрузке. Для автозапуска используйте systemd-сервис `glider-network` — см. раздел **«Автозапуск на Raspberry Pi»** ниже.
 
 ### SSH-доступ с удалённого устройства
 
@@ -215,10 +212,10 @@ SSH-сервер устанавливается и запускается авт
 
 ```bash
 # С удалённого устройства (192.168.144.31):
-ssh nuc5@192.168.144.30
+ssh glider1@192.168.144.30
 ```
 
-Пароль — пароль пользователя `nuc5` (тот же, что используется для `sudo`).
+Пароль — пароль пользователя `glider1` (тот же, что используется для `sudo`).
 
 #### Вход по ключу (без пароля)
 
@@ -226,20 +223,172 @@ ssh nuc5@192.168.144.30
 
 ```bash
 ssh-keygen -t ed25519
-ssh-copy-id nuc5@192.168.144.30
+ssh-copy-id glider1@192.168.144.30
 # Теперь вход без пароля:
-ssh nuc5@192.168.144.30
+ssh glider1@192.168.144.30
 ```
 
 ### Диагностика сетевых проблем
 
 | Симптом | Причина | Решение |
 |---|---|---|
-| Пинг до `.25` или `.11` не проходит | Маршрут идёт через неправильный интерфейс | `sudo ./configure_network.sh` |
+| Пинг до `.25` или `.11` не проходит | Маршрут идёт через неправильный интерфейс | `sudo systemctl restart glider-network` |
 | SSH зависает при подключении | Ответные пакеты уходят через другой порт | Добавьте IP клиента в `AIR_DEVICES` |
-| После перезагрузки связь пропала | Policy routing сбросился | Добавьте скрипт в crontab `@reboot` |
+| После перезагрузки связь пропала | Policy routing сбросился | `glider-network` в systemd восстанавливает автоматически |
 | `RTSP timeout` при съёмке | A8 mini недоступна | Проверьте `ip route get 192.168.144.25` |
 | `rp_filter` отбрасывает пакеты | strict mode (значение 1) | Скрипт ставит loose mode (2) автоматически |
+
+---
+
+## Автозапуск на Raspberry Pi (`startup_controller.py`)
+
+`startup_controller.py` — основной управляющий скрипт, который запускается автоматически при включении RPi и работает без участия оператора.
+
+### Логика работы
+
+```
+Включение RPi
+      │
+      ▼
+[1] Ожидание SIYI A8 mini (UDP 192.168.144.25:37260)
+      │  Повтор каждые 5 секунд до появления камеры
+      ▼
+[2] Установка Follow Mode (гимбал следует за движением платформы)
+      │
+      ▼
+[3] Подключение к USB-UART → чтение MAVLink-пакетов
+      │  Порт: /dev/ttyUSB0, 57600 бод
+      ▼
+[4] Мониторинг RC Channel 8
+      ├── ch8 > 1800  →  запуск panorama_shoot.py
+      ├── ch8 ≤ 1500  →  сброс (готов к следующему запуску)
+      └── камера пропала  →  вернуться к шагу [1]
+```
+
+### Установка зависимостей
+
+```bash
+# На Raspberry Pi (пользователь glider1):
+cd /home/glider1/glider_panorama
+
+# Установить системные пакеты и создать venv:
+chmod +x setup.sh
+./setup.sh
+
+# Дополнительные зависимости для startup_controller:
+source venv/bin/activate
+pip install pymavlink pyserial
+```
+
+### Установка systemd-сервисов (автозапуск)
+
+Два сервиса устанавливаются вместе. Порядок запуска фиксирован:
+```
+[network.target] → [glider-network] → [glider-controller]
+```
+`glider-network` настраивает маршрутизацию (root), затем стартует контроллер.
+
+```bash
+# 1. Скопировать оба юнит-файла в systemd
+sudo cp /home/glider1/glider_panorama/glider-network.service \
+        /home/glider1/glider_panorama/glider-controller.service \
+        /etc/systemd/system/
+
+# 2. Перечитать конфигурацию systemd
+sudo systemctl daemon-reload
+
+# 3. Включить автозапуск обоих сервисов
+sudo systemctl enable glider-network glider-controller
+
+# 4. Запустить немедленно (без перезагрузки)
+sudo systemctl start glider-network
+sudo systemctl start glider-controller
+```
+
+После этого оба сервиса будут стартовать **автоматически при каждом включении** RPi.
+
+### Проверка статуса
+
+```bash
+# Статус сетевого сервиса (однократный запуск):
+sudo systemctl status glider-network
+
+# Статус контроллера (работает / упал / перезапускается):
+sudo systemctl status glider-controller
+
+# Логи сетевой настройки:
+journalctl -u glider-network
+
+# Логи контроллера в реальном времени:
+journalctl -u glider-controller -f
+
+# Логи контроллера за последние 100 строк:
+journalctl -u glider-controller -n 100
+```
+
+### Управление сервисами вручную
+
+```bash
+# Перезапустить настройку сети вручную (например, после смены маршрутов):
+sudo systemctl restart glider-network
+
+# Перезапустить контроллер (после изменения конфига):
+sudo systemctl restart glider-controller
+
+# Остановить оба:
+sudo systemctl stop glider-controller glider-network
+
+# Убрать из автозапуска:
+sudo systemctl disable glider-network glider-controller
+```
+
+### Настройка параметров
+
+Откройте `startup_controller.py` и измените константы в секции **«Конфигурация»**:
+
+| Параметр | По умолчанию | Описание |
+|---|---|---|
+| `MAVLINK_PORT` | `/dev/ttyUSB0` | Путь к USB-UART адаптеру |
+| `MAVLINK_BAUD` | `57600` | Baudrate (ArduPilot / PX4) |
+| `RC_CH8_THRESHOLD` | `1800` | Порог активации панорамы |
+| `RC_REARM_THRESHOLD` | `1500` | Порог сброса (готов к повтору) |
+| `GIMBAL_CONNECT_RETRY_SEC` | `5` | Пауза между попытками подключения к камере |
+
+> После изменения параметров перезапустите сервис:
+> ```bash
+> sudo systemctl restart glider-controller
+> ```
+
+### Определение USB-порта адаптера
+
+Если адаптер USB-UART попал на другой номер (`ttyUSB1`, `ttyUSB2` и т.д.):
+
+```bash
+# Посмотреть все USB-последовательные порты:
+ls /dev/ttyUSB*
+
+# Посмотреть информацию о конкретном порту:
+udevadm info /dev/ttyUSB0 | grep -E 'ID_VENDOR|ID_MODEL'
+
+# Следить за появлением нового устройства при подключении:
+dmesg | tail -20
+```
+
+Затем исправьте `MAVLINK_PORT` в `startup_controller.py` и перезапустите сервис.
+
+### Диагностика
+
+| Симптом | Что проверить |
+|---|---|
+| `glider-network` не стартует | `journalctl -u glider-network` |
+| `glider-controller` не стартует | `journalctl -u glider-controller -n 50` |
+| Камера не находится | `ping 192.168.144.25`, проверьте сеть и статус `glider-network` |
+| MAVLink не подключается | `ls /dev/ttyUSB*`, проверьте baudrate |
+| Панорама не запускается | Проверьте RC ch8: значение должно превышать 1800 |
+| Панорама запускается повторно | ch8 должен упасть ниже 1500 для сброса триггера |
+| Нет venv | Запустите `./setup.sh`, затем `pip install pymavlink pyserial` |
+
+---
 
 ## Лицензия
 

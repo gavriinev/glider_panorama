@@ -1,0 +1,24 @@
+[Unit]
+Description=Glider Panorama — Network Configuration (SIYI routing + SSH)
+# Запускаем после того, как сетевые интерфейсы подняты
+After=network.target
+Before=glider-controller.service
+
+[Service]
+Type=oneshot
+# Скрипт требует root
+User=root
+WorkingDirectory=/home/glider1/glider_panorama
+ExecStart=/bin/bash /home/glider1/glider_panorama/configure_network.sh
+
+# Не перезапускать при ошибке — ошибка будет видна в логах
+Restart=no
+
+# Ждать завершения до старта зависимых сервисов
+RemainAfterExit=yes
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

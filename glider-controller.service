@@ -1,0 +1,25 @@
+[Unit]
+Description=Glider Panorama Startup Controller
+After=network-online.target glider-network.service
+Wants=network-online.target
+Requires=glider-network.service
+
+[Service]
+Type=simple
+User=glider1
+WorkingDirectory=/home/glider1/glider_panorama
+
+# Запуск через venv (создан через setup.sh):
+ExecStart=/home/glider1/glider_panorama/venv/bin/python3 /home/glider1/glider_panorama/startup_controller.py
+
+# Автоматический перезапуск при сбое
+Restart=always
+RestartSec=5
+
+# Логи доступны через: journalctl -u glider-controller -f
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target

@@ -3,6 +3,8 @@ Description=Glider Panorama — Network Configuration (SIYI routing + SSH)
 # Запускаем после того, как сетевые интерфейсы подняты
 After=network.target
 Before=glider-controller.service
+# Снимаем ограничение на количество перезапусков (по умолчанию 5 за 10 с)
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -11,8 +13,10 @@ User=root
 WorkingDirectory=/home/glider1/glider_panorama
 ExecStart=/bin/bash /home/glider1/glider_panorama/configure_network.sh
 
-# Не перезапускать при ошибке — ошибка будет видна в логах
-Restart=no
+# Перезапускать при ошибке (интерфейсы могут ещё не появиться)
+# Повтор каждые 15 секунд до первого успешного завершения
+Restart=on-failure
+RestartSec=15
 
 # Ждать завершения до старта зависимых сервисов
 RemainAfterExit=yes

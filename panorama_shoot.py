@@ -7,12 +7,15 @@ panorama_shoot.py
   2. Захватывает кадр из RTSP-потока → сохраняет на компьютер локально
 
 Зависимости: opencv-python  (pip install opencv-python)
-Использование: python3 panorama_shoot.py
+Использование:
+  python3 panorama_shoot.py
+  python3 panorama_shoot.py --output-dir shots/20260527_120000
 """
 
 import time
 import sys
 import os
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +46,7 @@ STABILIZE_DELAY = 1.0
 # Допустимая погрешность угла (градусы) для проверки достижения позиции
 ANGLE_TOLERANCE = 10.0
 
-# Папка для сохранения снимков
+# Папка для сохранения снимков (можно переопределить через --output-dir)
 OUTPUT_DIR = Path("./shots") / datetime.now().strftime("%Y%m%d_%H%M%S")
  
 # ---------------------------------------------------------------------------
@@ -208,4 +211,16 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="SIYI A8 mini панорамная съёмка")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Папка для сохранения снимков (no default: shots/YYYYMMDD_HHMMSS)"
+    )
+    args = parser.parse_args()
+
+    if args.output_dir:
+        OUTPUT_DIR = Path(args.output_dir)
+
     main()

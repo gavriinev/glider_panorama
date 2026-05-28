@@ -62,6 +62,9 @@ source venv/bin/activate
 
 ```bash
 python3 panorama_shoot.py
+
+# Указать папку вручную (используется startup_controller автоматически):
+python3 panorama_shoot.py --output-dir shots/20260527_120000
 ```
 
 Камера поворачивается по трём позициям, делает снимок в каждой.
@@ -95,6 +98,7 @@ python3 stitch_panorama.py --auto-cp shots/20260514_165039/ panorama.jpg
 | `SHOTS` | `[(-60, 0), (0, 0), (60, 0)]` | Позиции (yaw, pitch, label) |
 | `STABILIZE_DELAY` | `1.0` | Пауза стабилизации (сек) |
 | `ANGLE_TOLERANCE` | `10.0` | Допуск позиционирования (°) |
+| `--output-dir` (CLI) | авто (`shots/YYYYMMDD_HHMMSS`) | Папка для снимков и телеметрии |
 
 ### stitch_panorama.py
 
@@ -253,15 +257,19 @@ ssh glider1@192.168.144.30
 [1] Ожидание SIYI A8 mini (UDP 192.168.144.25:37260)
       │  Повтор каждые 5 секунд до появления камеры
       ▼
-[2] Установка Follow Mode (гимбал следует за движением платформы)
-      │
+[2] Lock Mode: гимбал стабилизирует горизонт, Yaw=0°
+      │  Фоновый поток каждые 5 с корректирует Yaw обратно к 0°
       ▼
-[3] Подключение к USB-UART → чтение MAVLink-пакетов
-      │  Порт: /dev/ttyUSB0, 57600 бод
+[3] Подключение к USB-UART → MAVLink (57600 бод, System=1, Component=1)
+      │  REQUEST_DATA_STREAM: RC 10 Hz + ATTITUDE/VFR_HUD/AHRS2 5 Hz
       ▼
-[4] Мониторинг RC Channel 8
-      ├── ch8 > 1800  →  запуск panorama_shoot.py
-      ├── ch8 ≤ 1500  →  сброс (готов к следующему запуску)
+[4] Мониторинг RC Channel 8 (пассивный приём, каждые 0.5 с)
+      ├── ch8 > 1800  →  остановить Yaw-коррекцию
+      │                   создать shots/YYYYMMDD_HHMMSS/
+      │                   запустить panorama_shoot.py
+      │                   записывать AHRS2/ATTITUDE/VFR_HUD → telemetry.json
+      │                   после съёмки — возобновить Yaw-коррекцию
+      ├── ch8 ≤ 1500  →  сброс триггера (готов к следующему запуску)
       └── камера пропала  →  вернуться к шагу [1]
 ```
 
@@ -286,7 +294,7 @@ pip install pymavlink pyserial
 ```
 [network.target] → [glider-network] → [glider-controller]
 ```
-`glider-network` настраивает маршрутизацию (root), затем стартует контроллер.
+`glider-network` настраивает маршрутизацию (root) и **автоматически повторяет попытку** каждые 15 с при ошибке (например, если сетевые интерфейсы ещё не поднялись). После первого успешного завершения стартует контроллер.
 
 ```bash
 # 1. Скопировать оба юнит-файла в systemd
@@ -346,13 +354,34 @@ sudo systemctl disable glider-network glider-controller
 
 Откройте `startup_controller.py` и измените константы в секции **«Конфигурация»**:
 
+**Гимбал и камера**
+
+| Параметр | По умолчанию | Описание |
+|---|---|---|
+| `GIMBAL_CONNECT_RETRY_SEC` | `5` | Пауза между попытками подключения к камере |
+| `YAW_TARGET` | `0.0` | Целевой угол Yaw (°) |
+| `YAW_CORRECT_INTERVAL` | `5.0` | Интервал коррекции Yaw (сек) |
+| `YAW_CORRECT_TOLERANCE` | `3.0` | Допуск коррекции Yaw (°) |
+
+**MAVLink / RC**
+
 | Параметр | По умолчанию | Описание |
 |---|---|---|
 | `MAVLINK_PORT` | `/dev/ttyUSB0` | Путь к USB-UART адаптеру |
 | `MAVLINK_BAUD` | `57600` | Baudrate (ArduPilot / PX4) |
+| `MAV_TARGET_SYSTEM` | `1` | System ID автопилота |
+| `MAV_TARGET_COMPONENT` | `1` | Component ID автопилота |
+| `RC_POLL_INTERVAL` | `0.5` | Период чтения RC из потока (сек) |
+| `RC_REPLY_TIMEOUT` | `2.0` | Таймаут ожидания RC-пакета (сек) |
 | `RC_CH8_THRESHOLD` | `1800` | Порог активации панорамы |
-| `RC_REARM_THRESHOLD` | `1500` | Порог сброса (готов к повтору) |
-| `GIMBAL_CONNECT_RETRY_SEC` | `5` | Пауза между попытками подключения к камере |
+| `RC_REARM_THRESHOLD` | `1500` | Порог сброса триггера |
+
+**Телеметрия**
+
+| Параметр | По умолчанию | Описание |
+|---|---|---|
+| `TELEMETRY_POLL_HZ` | `5` | Частота записи телеметрии (Hz) |
+| `TELEMETRY_FILENAME` | `telemetry.json` | Имя файла в папке со снимками |
 
 > После изменения параметров перезапустите сервис:
 > ```bash
@@ -376,16 +405,61 @@ dmesg | tail -20
 
 Затем исправьте `MAVLINK_PORT` в `startup_controller.py` и перезапустите сервис.
 
+### Телеметрия во время съёмки
+
+При каждом запуске панорамы `startup_controller.py`:
+1. Останавливает поток коррекции Yaw (чтобы не мешать гимбалу)
+2. Параллельно записывает телеметрию автопилота в `telemetry.json`
+3. После завершения съёмки автоматически возобновляет коррекцию Yaw
+
+Телеметрия поступает через `REQUEST_DATA_STREAM` (автопилот стримит сам), данные принимаются пассивно.
+
+**Записываемые MAVLink-пакеты:**
+
+| Сообщение | ID | Поля |
+|---|---|---|
+| `AHRS2` | 178 | roll, pitch, yaw, altitude, lat, lng |
+| `ATTITUDE` | 30 | roll, pitch, yaw, rollspeed, pitchspeed, yawspeed |
+| `VFR_HUD` | 74 | airspeed, groundspeed, heading, throttle, alt, climb |
+
+**Структура папки после съёмки:**
+
+```
+shots/20260527_201500/
+├── LEFT.jpg
+├── CENTER.jpg
+├── RIGHT.jpg
+└── telemetry.json    ← AHRS2 / ATTITUDE / VFR_HUD, 5 записей/сек
+```
+
+**Формат `telemetry.json`:**
+```json
+[
+  {
+    "ts": "2026-05-27T17:15:00.000Z",
+    "AHRS2":   { "roll": 0.01, "pitch": -0.02, "yaw": 0.0, ... },
+    "ATTITUDE": { "roll": 0.01, "pitch": -0.02, "yaw": 0.0, ... },
+    "VFR_HUD": { "airspeed": 12.3, "groundspeed": 11.9, "heading": 270, ... }
+  },
+  ...
+]
+```
+
 ### Диагностика
 
 | Симптом | Что проверить |
 |---|---|
-| `glider-network` не стартует | `journalctl -u glider-network` |
+| `glider-network` не стартует / в цикле | `journalctl -u glider-network -f` — ждёт интерфейсы, повтор каждые 15 с |
 | `glider-controller` не стартует | `journalctl -u glider-controller -n 50` |
 | Камера не находится | `ping 192.168.144.25`, проверьте сеть и статус `glider-network` |
+| Гимбал не в Lock Mode | `journalctl -u glider-controller` — ищите строку «Режим гимбала» |
 | MAVLink не подключается | `ls /dev/ttyUSB*`, проверьте baudrate |
-| Панорама не запускается | Проверьте RC ch8: значение должно превышать 1800 |
+| RC-пакеты не приходят | Проверьте baudrate; в логах должна быть строка «запрошены RC (10 Hz)» |
+| Автопилот не стримит телеметрию | Убедитесь что `REQUEST_DATA_STREAM` поддерживается (ArduPilot) |
+| Yaw не возвращается после панорамы | Проверьте логи `[YAW] Поток коррекции Yaw возобновлён` |
+| Панорама не запускается | RC ch8 должен превышать 1800 |
 | Панорама запускается повторно | ch8 должен упасть ниже 1500 для сброса триггера |
+| Нет `telemetry.json` | Проверьте логи `[TEL]` в journalctl |
 | Нет venv | Запустите `./setup.sh`, затем `pip install pymavlink pyserial` |
 
 ---

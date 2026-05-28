@@ -53,7 +53,7 @@ PACKAGES=(
 )
 
 info "Установка системных пакетов..."
-sudo apt install -y -qq "${PACKAGES[@]}"
+# sudo apt install -y -qq "${PACKAGES[@]}"
 
 # -------------------------------------------------------
 # 3. Проверяем наличие Hugin CLI
